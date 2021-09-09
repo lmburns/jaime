@@ -9,7 +9,8 @@ edition = "2018"
 [dependencies]
 xdg = "*"
 serde = { version = "*", features = ["derive"] }
-serde_yaml = "*"
-skim = "*"
-rustyline = "*"
-failure = "*"
+skim = "0.9.4"
+rustyline = "9.0.0"
+serde_yaml = "0.8.20"
+failure = "0.1.8"
+shlex = "1.1.0"

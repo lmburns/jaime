@@ -1,23 +1,22 @@
-#[macro_use] extern crate failure;
+use failure::{format_err, Error};
+use rustyline::{error::ReadlineError, Editor};
+use serde::{Deserialize, Serialize};
+use skim::{
+    prelude::{SkimItemReader, SkimItemReaderOption, SkimOptionsBuilder},
+    Skim,
+};
 
-use failure::Error;
-use rustyline::Editor;
-use rustyline::error::ReadlineError;
-use serde::{Serialize, Deserialize};
-use skim::{Skim, SkimOptionsBuilder, SkimItemReader};
+use std::{collections::HashMap, io::Cursor, path::PathBuf, process::Command};
 
-use std::collections::HashMap;
-use std::io::Cursor;
-use std::path::PathBuf;
-use std::process::Command;
-
+#[derive(Debug)]
 pub struct Context {
     pub cache_directory: PathBuf,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     pub options: HashMap<String, Action>,
+    pub shell:   Option<String>,
 }
 
 impl Config {
@@ -28,7 +27,7 @@ impl Config {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum Widget {
     FromCommand {
@@ -38,7 +37,7 @@ pub enum Widget {
     FreeText,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum Action {
     Command {
@@ -50,8 +49,8 @@ pub enum Action {
     },
 }
 
-fn run_shell(context: &Context, cmd: &str) -> Result<(), Error> {
-    Command::new("sh")
+fn run_shell(context: &Context, cmd: &str, shell: &str) -> Result<(), Error> {
+    Command::new(shell)
         .arg("-c")
         .arg(cmd)
         .env("JAIME_CACHE_DIR", &context.cache_directory)
@@ -61,26 +60,56 @@ fn run_shell(context: &Context, cmd: &str) -> Result<(), Error> {
 }
 
 fn run_shell_command_for_output(context: &Context, cmd: &str) -> Result<String, Error> {
-    Ok(std::str::from_utf8(Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .env("JAIME_CACHE_DIR", &context.cache_directory)
-        .output()?
-        .stdout
-        .as_slice())?.to_owned())
+    Ok(std::str::from_utf8(
+        Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .env("JAIME_CACHE_DIR", &context.cache_directory)
+            .output()?
+            .stdout
+            .as_slice(),
+    )?
+    .to_owned())
 }
 
 fn display_selector(input: String, preview: Option<&str>) -> Result<Option<String>, Error> {
+    let mut skim_args = Vec::new();
+    let default_height = String::from("50%");
+    skim_args.extend(
+        std::env::var("SKIM_DEFAULT_OPTIONS")
+            .ok()
+            .and_then(|val| shlex::split(&val))
+            .unwrap_or_default(),
+    );
+
+    let item_reader_opts = SkimItemReaderOption::default().ansi(true).build();
     let options = SkimOptionsBuilder::default()
-        .multi(false)
-        .ansi(true)
         .preview(preview)
+        .height(
+            Some(skim_args
+                .iter()
+                .find(|arg| arg.contains("--height") && *arg != &"--height".to_string())
+                .unwrap_or_else(|| {
+                    if let Some(pos) = skim_args.iter().position(|arg| arg.contains("--height")) {
+                        &skim_args[pos + 1]
+                    } else {
+                        &default_height
+                    }
+                })),
+        )
+        .color(
+            skim_args
+                .iter()
+                .find(|arg| arg.contains("--color") && !arg.contains("{}"))
+                .map(|p| p.as_str()),
+        )
+        .multi(false)
         .build()
         .map_err(|err| format_err!("{}", err))?;
 
-    // `SkimItemReader` is a helper to turn any `BufRead` into a stream of `SkimItem`
-    // `SkimItem` was implemented for `AsRef<str>` by default
-    let item_reader = SkimItemReader::default();
+    // `SkimItemReader` is a helper to turn any `BufRead` into a stream of
+    // `SkimItem` `SkimItem` was implemented for `AsRef<str>` by default
+    let item_reader = SkimItemReader::new(item_reader_opts);
     let items = item_reader.of_bufread(Cursor::new(input));
 
     let selected_items = Skim::run_with(&options, Some(items))
@@ -98,21 +127,15 @@ fn readline() -> Result<String, Error> {
 
     let line = rl.readline("> ");
     match line {
-        Ok(line) => { Ok(line) },
-        Err(ReadlineError::Interrupted) => {
-            Err(format_err!("Interrupted"))
-        },
-        Err(ReadlineError::Eof) => {
-            Err(format_err!("EOF"))
-        },
-        Err(err) => {
-            Err(err)?
-        }
+        Ok(line) => Ok(line),
+        Err(ReadlineError::Interrupted) => Err(format_err!("Interrupted")),
+        Err(ReadlineError::Eof) => Err(format_err!("EOF")),
+        Err(err) => Err(err)?,
     }
 }
 
 impl Action {
-    pub fn run(&self, context: &Context) -> Result<(), Error> {
+    pub fn run(&self, context: &Context, config: &Config) -> Result<(), Error> {
         match self {
             Action::Command { command, widgets } => {
                 let mut args: Vec<String> = Vec::new();
@@ -123,7 +146,7 @@ impl Action {
                             Widget::FreeText => {
                                 args.push(readline()?);
                             },
-                            Widget::FromCommand{ command, preview } => {
+                            Widget::FromCommand { command, preview } => {
                                 let mut command = command.clone();
                                 for (i, arg) in args.iter().enumerate().take(index) {
                                     command = command.replace(&format!("{{{}}}", i), arg);
@@ -131,7 +154,8 @@ impl Action {
 
                                 let output = run_shell_command_for_output(context, &command)?;
 
-                                let selected_command = display_selector(output, preview.as_ref().map(|s| s.as_ref()))?;
+                                let selected_command =
+                                    display_selector(output, preview.as_ref().map(|s| s.as_ref()))?;
 
                                 if let Some(selected_command) = selected_command {
                                     args.push(selected_command);
@@ -149,16 +173,26 @@ impl Action {
                     command = command.replace(&format!("{{{}}}", index), arg);
                 }
 
-                run_shell(context, &command)
+                let shell = if let Some(sh) = &config.shell {
+                    sh
+                } else {
+                    "sh"
+                };
+
+                run_shell(context, &command, shell)
             },
             Action::Select { options } => {
-                let input = options.keys().map(|k| k.as_ref()).collect::<Vec<&str>>().join("\n");
+                let input = options
+                    .keys()
+                    .map(|k| k.as_ref())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
                 let selected_command = display_selector(input, None)?;
 
                 if let Some(selected_command) = selected_command {
                     match options.get(&selected_command) {
-                        Some(widget) => { widget.run(context) },
-                        None => { Ok(()) },
+                        Some(widget) => widget.run(context, config),
+                        None => Ok(()),
                     }
                 } else {
                     Ok(())
