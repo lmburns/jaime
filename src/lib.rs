@@ -1,9 +1,66 @@
+#![deny(
+    clippy::all,
+    clippy::complexity,
+    clippy::correctness,
+    clippy::pedantic,
+    clippy::perf,
+    clippy::style
+)]
+#![deny(
+    absolute_paths_not_starting_with_crate,
+    anonymous_parameters,
+    bad_style,
+    const_err,
+    dead_code,
+    ellipsis_inclusive_range_patterns,
+    exported_private_dependencies,
+    ill_formed_attribute_input,
+    improper_ctypes,
+    keyword_idents,
+    macro_use_extern_crate,
+    meta_variable_misuse, // May have false positives
+    missing_abi,
+    missing_debug_implementations, // can affect compile time/code size
+    no_mangle_generic_items,
+    non_shorthand_field_patterns,
+    noop_method_call,
+    overflowing_literals,
+    path_statements,
+    patterns_in_fns_without_body,
+    pointer_structural_match,
+    private_in_public,
+    pub_use_of_private_extern_crate,
+    semicolon_in_expressions_from_macros,
+    single_use_lifetimes,
+    trivial_casts,
+    trivial_numeric_casts,
+    unaligned_references,
+    unconditional_recursion,
+    unreachable_pub,
+    unsafe_code,
+    unused,
+    unused_allocation,
+    unused_comparisons,
+    unused_extern_crates,
+    unused_import_braces,
+    unused_lifetimes,
+    unused_parens,
+    unused_qualifications,
+    variant_size_differences,
+    while_true
+)]
+
 use failure::{format_err, Error};
 use rustyline::{error::ReadlineError, Editor};
 use serde::{Deserialize, Serialize};
 use skim::{
     prelude::{SkimItemReader, SkimItemReaderOption, SkimOptionsBuilder},
     Skim,
+};
+
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 use std::{collections::HashMap, io::Cursor, path::PathBuf, process::Command};
@@ -20,6 +77,7 @@ pub struct Config {
 }
 
 impl Config {
+    #[must_use]
     pub fn into_action(self) -> Action {
         Action::Select {
             options: self.options,
@@ -59,9 +117,13 @@ fn run_shell(context: &Context, cmd: &str, shell: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn run_shell_command_for_output(context: &Context, cmd: &str) -> Result<String, Error> {
+fn run_shell_command_for_output(
+    context: &Context,
+    cmd: &str,
+    shell: &str,
+) -> Result<String, Error> {
     Ok(std::str::from_utf8(
-        Command::new("sh")
+        Command::new(shell)
             .arg("-c")
             .arg(cmd)
             .env("JAIME_CACHE_DIR", &context.cache_directory)
@@ -75,6 +137,13 @@ fn run_shell_command_for_output(context: &Context, cmd: &str) -> Result<String, 
 fn display_selector(input: String, preview: Option<&str>) -> Result<Option<String>, Error> {
     let mut skim_args = Vec::new();
     let default_height = String::from("50%");
+    let default_margin = String::from("0%");
+    let default_layout = String::from("default");
+    let default_theme = String::from(
+        "matched:108,matched_bg:0,current:254,current_bg:236,current_match:151,current_match_bg:\
+         236,spinner:148,info:144,prompt:110,cursor:161,selected:168,header:109,border:59",
+    );
+
     skim_args.extend(
         std::env::var("SKIM_DEFAULT_OPTIONS")
             .ok()
@@ -85,24 +154,63 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
     let item_reader_opts = SkimItemReaderOption::default().ansi(true).build();
     let options = SkimOptionsBuilder::default()
         .preview(preview)
-        .height(
-            Some(skim_args
+        .margin(Some(
+            skim_args
+                .iter()
+                .find(|arg| arg.contains("--margin") && *arg != &"--margin".to_string())
+                .unwrap_or_else(|| {
+                    skim_args
+                        .iter()
+                        .position(|arg| arg.contains("--margin"))
+                        .map_or(&default_margin, |pos| &skim_args[pos + 1])
+                }),
+        ))
+        .height(Some(
+            skim_args
                 .iter()
                 .find(|arg| arg.contains("--height") && *arg != &"--height".to_string())
                 .unwrap_or_else(|| {
-                    if let Some(pos) = skim_args.iter().position(|arg| arg.contains("--height")) {
-                        &skim_args[pos + 1]
-                    } else {
-                        &default_height
-                    }
-                })),
-        )
-        .color(
+                    skim_args
+                        .iter()
+                        .position(|arg| arg.contains("--height"))
+                        .map_or(&default_height, |pos| &skim_args[pos + 1])
+                }),
+        ))
+        .layout(
             skim_args
                 .iter()
-                .find(|arg| arg.contains("--color") && !arg.contains("{}"))
-                .map(|p| p.as_str()),
+                .find(|arg| arg.contains("--layout") && *arg != &"--layout".to_string())
+                .unwrap_or_else(|| {
+                    skim_args
+                        .iter()
+                        .position(|arg| arg.contains("--layout"))
+                        .map_or(&default_layout, |pos| &skim_args[pos + 1])
+                }),
         )
+        .color(Some(
+            skim_args
+                .iter()
+                .find(|arg| {
+                    arg.contains("--color") && *arg != &"--color".to_string() && !arg.contains("{}")
+                })
+                .unwrap_or_else(|| {
+                    skim_args
+                        .iter()
+                        .position(|arg| arg.contains("--color"))
+                        .map_or(&default_theme, |pos| &skim_args[pos + 1])
+                }),
+        ))
+        .bind(
+            skim_args
+                .iter()
+                .filter(|arg| arg.contains("--bind"))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .reverse(skim_args.iter().any(|arg| arg.contains("--reverse")))
+        .tac(skim_args.iter().any(|arg| arg.contains("--tac")))
+        .nosort(skim_args.iter().any(|arg| arg.contains("--no-sort")))
+        .inline_info(skim_args.iter().any(|arg| arg.contains("--inline-info")))
         .multi(false)
         .build()
         .map_err(|err| format_err!("{}", err))?;
@@ -112,13 +220,11 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
     let item_reader = SkimItemReader::new(item_reader_opts);
     let items = item_reader.of_bufread(Cursor::new(input));
 
-    let selected_items = Skim::run_with(&options, Some(items))
-        .map(|out| out.selected_items)
-        .unwrap_or_else(Vec::new);
+    let selected_items =
+        Skim::run_with(&options, Some(items)).map_or_else(Vec::new, |out| out.selected_items);
 
     Ok(selected_items
-        .iter()
-        .next()
+        .get(0)
         .map(|selected| selected.output().to_string()))
 }
 
@@ -130,12 +236,34 @@ fn readline() -> Result<String, Error> {
         Ok(line) => Ok(line),
         Err(ReadlineError::Interrupted) => Err(format_err!("Interrupted")),
         Err(ReadlineError::Eof) => Err(format_err!("EOF")),
-        Err(err) => Err(err)?,
+        Err(err) => Err(err.into()),
     }
 }
 
 impl Action {
+    /// # Errors
+    /// Could return an error if the configuration file is unable to be parsed
+    //
+    /// # Panics
+    /// Unwrapping on `ctrlc`
     pub fn run(&self, context: &Context, config: &Config) -> Result<(), Error> {
+        let shell = &config
+            .shell
+            .as_ref()
+            .map_or("sh".to_owned(), ToOwned::to_owned);
+
+        // `ctrlc` is used to exit the recursive loop that makes this program work
+        let running = Arc::new(AtomicBool::new(true));
+        let r = Arc::clone(&running);
+        ctrlc::set_handler(move || {
+            if r.load(Ordering::Relaxed) {
+                std::process::exit(1);
+            } else {
+                r.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+
         match self {
             Action::Command { command, widgets } => {
                 let mut args: Vec<String> = Vec::new();
@@ -152,7 +280,8 @@ impl Action {
                                     command = command.replace(&format!("{{{}}}", i), arg);
                                 }
 
-                                let output = run_shell_command_for_output(context, &command)?;
+                                let output =
+                                    run_shell_command_for_output(context, &command, shell)?;
 
                                 let selected_command =
                                     display_selector(output, preview.as_ref().map(|s| s.as_ref()))?;
@@ -173,12 +302,6 @@ impl Action {
                     command = command.replace(&format!("{{{}}}", index), arg);
                 }
 
-                let shell = if let Some(sh) = &config.shell {
-                    sh
-                } else {
-                    "sh"
-                };
-
                 run_shell(context, &command, shell)
             },
             Action::Select { options } => {
@@ -189,14 +312,17 @@ impl Action {
                     .join("\n");
                 let selected_command = display_selector(input, None)?;
 
-                if let Some(selected_command) = selected_command {
+                selected_command.map_or(Ok(()), |selected_command| {
                     match options.get(&selected_command) {
-                        Some(widget) => widget.run(context, config),
+                        Some(widget) => {
+                            if running.load(Ordering::Relaxed) {
+                                std::process::exit(1);
+                            }
+                            widget.run(context, config)
+                        },
                         None => Ok(()),
                     }
-                } else {
-                    Ok(())
-                }
+                })
             },
         }
     }

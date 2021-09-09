@@ -2,6 +2,9 @@
 
 A command line launcher inspired by Alfred.
 
+# TODO:
+* Prevent escape button from going through all menus
+
 ![Usage](assets/usage.gif)
 
 ## Install
