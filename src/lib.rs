@@ -134,7 +134,11 @@ fn run_shell_command_for_output(
     .to_owned())
 }
 
-fn display_selector(input: String, preview: Option<&str>) -> Result<Option<String>, Error> {
+fn display_selector(
+    input: String,
+    preview: Option<&str>,
+    quit: &Arc<AtomicBool>,
+) -> Result<Option<String>, Error> {
     let mut skim_args = Vec::new();
     let default_height = String::from("50%");
     let default_margin = String::from("0%");
@@ -223,6 +227,10 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
     let selected_items =
         Skim::run_with(&options, Some(items)).map_or_else(Vec::new, |out| out.selected_items);
 
+    if quit.load(Ordering::Relaxed) {
+        std::process::exit(1);
+    }
+
     Ok(selected_items
         .get(0)
         .map(|selected| selected.output().to_string()))
@@ -246,23 +254,20 @@ impl Action {
     //
     /// # Panics
     /// Unwrapping on `ctrlc`
-    pub fn run(&self, context: &Context, config: &Config) -> Result<(), Error> {
+    pub fn run(
+        &self,
+        context: &Context,
+        config: &Config,
+        quit: &Arc<AtomicBool>,
+    ) -> Result<(), Error> {
         let shell = &config
             .shell
             .as_ref()
             .map_or("sh".to_owned(), ToOwned::to_owned);
 
-        // `ctrlc` is used to exit the recursive loop that makes this program work
-        let running = Arc::new(AtomicBool::new(true));
-        let r = Arc::clone(&running);
-        ctrlc::set_handler(move || {
-            if r.load(Ordering::Relaxed) {
-                std::process::exit(1);
-            } else {
-                r.store(true, Ordering::Relaxed);
-            }
-        })
-        .unwrap();
+        if quit.load(Ordering::Relaxed) {
+            std::process::exit(1);
+        }
 
         match self {
             Action::Command { command, widgets } => {
@@ -283,8 +288,11 @@ impl Action {
                                 let output =
                                     run_shell_command_for_output(context, &command, shell)?;
 
-                                let selected_command =
-                                    display_selector(output, preview.as_ref().map(|s| s.as_ref()))?;
+                                let selected_command = display_selector(
+                                    output,
+                                    preview.as_ref().map(|s| s.as_ref()),
+                                    quit,
+                                )?;
 
                                 if let Some(selected_command) = selected_command {
                                     args.push(selected_command);
@@ -310,16 +318,11 @@ impl Action {
                     .map(|k| k.as_ref())
                     .collect::<Vec<&str>>()
                     .join("\n");
-                let selected_command = display_selector(input, None)?;
+                let selected_command = display_selector(input, None, quit)?;
 
                 selected_command.map_or(Ok(()), |selected_command| {
                     match options.get(&selected_command) {
-                        Some(widget) => {
-                            if running.load(Ordering::Relaxed) {
-                                std::process::exit(1);
-                            }
-                            widget.run(context, config)
-                        },
+                        Some(widget) => widget.run(context, config, quit),
                         None => Ok(()),
                     }
                 })

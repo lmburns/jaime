@@ -1,5 +1,12 @@
 use failure::{Error, ResultExt};
-use std::{fs::File, process};
+use std::{
+    fs::File,
+    process,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use jaime::{Config, Context};
 
@@ -17,7 +24,18 @@ fn actual_main() -> Result<(), Error> {
         cache_directory: xdg_dirs.create_cache_directory("cache")?,
     };
 
-    action.run(&context, &config)?;
+    let running = Arc::new(AtomicBool::new(false));
+    let r = Arc::clone(&running);
+    // Should work for a double-ctrl-c exit, but doesn't
+    ctrlc::set_handler(move || {
+        if r.load(Ordering::Relaxed) {
+            std::process::exit(1);
+        } else {
+            r.store(true, Ordering::Relaxed);
+        }
+    })?;
+
+    action.run(&context, &config, &running)?;
 
     Ok(())
 }
