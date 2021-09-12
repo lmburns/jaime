@@ -173,6 +173,7 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
             .unwrap_or_default(),
     );
 
+    let item_reader_opts = SkimItemReaderOption::default().ansi(true).build();
     let options = SkimOptionsBuilder::default()
         .preview(preview)
         .margin(Some(
@@ -238,7 +239,6 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
 
     // `SkimItemReader` is a helper to turn any `BufRead` into a stream of
     // `SkimItem` `SkimItem` was implemented for `AsRef<str>` by default
-    let item_reader_opts = SkimItemReaderOption::default().ansi(true).build();
     let item_reader = SkimItemReader::new(item_reader_opts);
     let items = item_reader.of_bufread(Cursor::new(input));
 
@@ -247,7 +247,7 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
     Ok(selected_items
         .map_or_else(Vec::new, |out| {
             if out.is_abort {
-                std::process::exit(130);
+                std::process::exit(1);
             }
             out.selected_items
         })

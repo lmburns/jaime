@@ -1,3 +1,4 @@
+#![allow(unused)]
 #![deny(
     clippy::all,
     clippy::complexity,
@@ -38,14 +39,14 @@
     unconditional_recursion,
     unreachable_pub,
     unsafe_code,
-    unused,
-    unused_allocation,
-    unused_comparisons,
-    unused_extern_crates,
-    unused_import_braces,
-    unused_lifetimes,
-    unused_parens,
-    unused_qualifications,
+    // unused,
+    // unused_allocation,
+    // unused_comparisons,
+    // unused_extern_crates,
+    // unused_import_braces,
+    // unused_lifetimes,
+    // unused_parens,
+    // unused_qualifications,
     variant_size_differences,
     while_true
 )]
@@ -55,11 +56,39 @@ use failure::{format_err, Error};
 use rustyline::{error::ReadlineError, Editor};
 use serde::{Deserialize, Serialize};
 use skim::{
-    prelude::{SkimItemReader, SkimItemReaderOption, SkimOptionsBuilder},
-    Skim,
+    prelude::{
+        SkimItemReader, SkimItemReaderOption, SkimItemReceiver, SkimItemSender, SkimOptionsBuilder,
+    },
+    AnsiString, DisplayContext, Skim, SkimItem,
 };
 
-use std::{collections::HashMap, env, io::Cursor, path::PathBuf, process::Command};
+use std::{
+    borrow::Cow, collections::HashMap, env, io::{Cursor, BufReader}, path::PathBuf, process::Command, sync::Arc,
+};
+pub use std::{cell::RefCell, rc::Rc};
+
+/// Wrapper used to implement attributes of `SkimItem` for a `String`
+pub(crate) struct SkimJaime(String);
+
+impl From<String> for SkimJaime {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl SkimItem for SkimJaime {
+    fn display(&self, _: DisplayContext) -> AnsiString {
+        self.0.to_string().into()
+    }
+
+    fn text(&self) -> Cow<str> {
+        self.0.to_string().into()
+    }
+
+    fn output(&self) -> Cow<str> {
+        self.0.clone().into()
+    }
+}
 
 #[derive(Debug)]
 pub struct Context {
@@ -131,7 +160,7 @@ fn run_shell_command_for_output(
     context: &Context,
     cmd: &str,
     shell: &str,
-) -> Result<String, Error> {
+) -> Result<Vec<SkimJaime>, Error> {
     let mut builder = Command::new(shell);
 
     if shell == "zsh" {
@@ -143,19 +172,22 @@ fn run_shell_command_for_output(
         builder.arg("-u");
     }
 
-    Ok(std::str::from_utf8(
-        builder
-            .arg("-c")
-            .arg(cmd)
-            .env("JAIME_CACHE_DIR", &context.cache_directory)
-            .output()?
-            .stdout
-            .as_slice(),
-    )?
-    .to_owned())
+    let output = builder
+        .arg("-c")
+        .arg(cmd)
+        .env("JAIME_CACHE_DIR", &context.cache_directory)
+        .output()?;
+
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .map(|g| g.to_owned().into())
+        .collect::<Vec<SkimJaime>>())
 }
 
-fn display_selector(input: String, preview: Option<&str>) -> Result<Option<String>, Error> {
+fn display_selector(
+    items: SkimItemReceiver,
+    preview: Option<&str>,
+) -> Result<Option<String>, Error> {
     let mut skim_args = Vec::new();
     let default_height = String::from("50%");
     let default_margin = String::from("0%");
@@ -173,7 +205,7 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
             .unwrap_or_default(),
     );
 
-    let options = SkimOptionsBuilder::default()
+    let mut options = SkimOptionsBuilder::default()
         .preview(preview)
         .margin(Some(
             skim_args
@@ -236,18 +268,28 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
         .build()
         .map_err(|err| format_err!("{}", err))?;
 
+    let item_reader_opts = SkimItemReaderOption::default().ansi(true).build();
+    let item_reader = Rc::new(RefCell::new(SkimItemReader::new(item_reader_opts)));
+
+    options.cmd_collector = item_reader.clone();
+
     // `SkimItemReader` is a helper to turn any `BufRead` into a stream of
     // `SkimItem` `SkimItem` was implemented for `AsRef<str>` by default
-    let item_reader_opts = SkimItemReaderOption::default().ansi(true).build();
-    let item_reader = SkimItemReader::new(item_reader_opts);
-    let items = item_reader.of_bufread(Cursor::new(input));
+
+    // let item_reader = SkimItemReader::new(item_reader_opts);
+
+    // let j = Cursor::new(items);
+
+    // let rx_item = item_reader.borrow().of_bufread(Cursor::new(items.into));
+
+    let options = options;
 
     let selected_items = Skim::run_with(&options, Some(items));
 
     Ok(selected_items
         .map_or_else(Vec::new, |out| {
             if out.is_abort {
-                std::process::exit(130);
+                std::process::exit(1);
             }
             out.selected_items
         })
@@ -265,6 +307,17 @@ fn readline() -> Result<String, Error> {
         Err(ReadlineError::Eof) => Err(format_err!("EOF")),
         Err(err) => Err(err.into()),
     }
+}
+
+fn skim_items<I: SkimItem>(items: Vec<I>) -> SkimItemReceiver {
+    let (tx_item, rx_item): (SkimItemSender, SkimItemReceiver) =
+        skim::prelude::bounded(items.len());
+
+    for g in items {
+        let _drop = tx_item.send(Arc::new(g));
+    }
+
+    rx_item
 }
 
 impl Action {
@@ -295,8 +348,9 @@ impl Action {
                                     command = command.replace(&format!("{{{}}}", i), arg);
                                 }
 
-                                let output =
-                                    run_shell_command_for_output(context, &command, shell)?;
+                                let output = skim_items(run_shell_command_for_output(
+                                    context, &command, shell,
+                                )?);
 
                                 let selected_command =
                                     display_selector(output, preview.as_ref().map(|s| s.as_ref()))?;
@@ -323,17 +377,18 @@ impl Action {
                 options,
                 description,
             } => {
-                let input = options
-                    .keys()
-                    .map(|k| {
-                        if let Some(desc) = description {
-                            format!("{}: {}", k.green().bold(), desc.magenta())
-                        } else {
-                            k.green().bold().to_string()
-                        }
-                    })
-                    .collect::<Vec<String>>()
-                    .join("\n");
+                let input = skim_items(
+                    options
+                        .keys()
+                        .map(|k| {
+                            if let Some(desc) = description {
+                                format!("{}: {}", k, desc).into()
+                            } else {
+                                k.to_string().into()
+                            }
+                        })
+                        .collect::<Vec<SkimJaime>>(),
+                );
                 let selected_command = display_selector(input, None)?;
 
                 selected_command.map_or(Ok(()), |selected_command| {

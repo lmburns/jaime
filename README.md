@@ -2,10 +2,15 @@
 
 A command line launcher inspired by Alfred.
 
-# TODO:
+## TODO:
+* Allow bind options and options for particular command
+* Allow (better) description displaying
+* Make asynchronous
+
+## Fork:
 * Prevent escape button from going through all menus
-* Allow bind option
-* Allow description displaying
+* Colorizes output
+* Reads commands from `SKIM_DEFAULT_OPTIONS`
 
 ![Usage](assets/usage.gif)
 

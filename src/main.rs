@@ -1,3 +1,4 @@
+#![allow(unused)]
 use failure::{Error, ResultExt};
 use std::{fs::File, process};
 
