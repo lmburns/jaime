@@ -97,8 +97,9 @@ pub enum Widget {
 #[serde(tag = "type")]
 pub enum Action {
     Command {
-        command: String,
-        widgets: Option<Vec<Widget>>,
+        description: Option<String>,
+        command:     String,
+        widgets:     Option<Vec<Widget>>,
     },
     Select {
         description: Option<String>,
@@ -280,7 +281,9 @@ impl Action {
         );
 
         match self {
-            Action::Command { command, widgets } => {
+            Action::Command {
+                command, widgets, ..
+            } => {
                 let mut args: Vec<String> = Vec::new();
 
                 if let Some(widgets) = widgets {
@@ -321,19 +324,30 @@ impl Action {
             },
             Action::Select {
                 options,
-                description,
+                description: _,
             } => {
                 let input = options
                     .keys()
                     .map(|k| {
-                        if let Some(desc) = description {
-                            format!("{}: {}", k.green().bold(), desc.magenta())
+                        if let Some(Action::Select {
+                            description: Some(description),
+                            ..
+                        }) = options.get(k)
+                        {
+                            format!("{}: {}", k.green().bold(), description.magenta())
+                        } else if let Some(Action::Command {
+                            description: Some(description),
+                            ..
+                        }) = options.get(k)
+                        {
+                            format!("{}: {}", k.green().bold(), description.magenta())
                         } else {
                             k.green().bold().to_string()
                         }
                     })
                     .collect::<Vec<String>>()
                     .join("\n");
+
                 let selected_command = display_selector(input, None)?;
 
                 selected_command.map_or(Ok(()), |selected_command| {
