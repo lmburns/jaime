@@ -15,10 +15,7 @@ fn actual_main() -> Result<(), Error> {
         cache_directory: xdg_dirs.create_cache_directory("cache")?,
     };
 
-    if let Err(err) = action.run(&context, &config) {
-        eprintln!("Error: {}", err);
-        process::exit(1);
-    }
+    action.run(&context, &config)?;
 
     Ok(())
 }

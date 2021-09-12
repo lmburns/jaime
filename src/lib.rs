@@ -50,6 +50,7 @@
     while_true
 )]
 
+use colored::Colorize;
 use failure::{format_err, Error};
 use rustyline::{error::ReadlineError, Editor};
 use serde::{Deserialize, Serialize};
@@ -67,15 +68,17 @@ pub struct Context {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
-    pub options: HashMap<String, Action>,
-    pub shell:   Option<String>,
+    pub options:     HashMap<String, Action>,
+    pub shell:       Option<String>,
+    pub description: Option<String>,
 }
 
 impl Config {
     #[must_use]
     pub fn into_action(self) -> Action {
         Action::Select {
-            options: self.options,
+            options:     self.options,
+            description: self.description,
         }
     }
 }
@@ -98,7 +101,8 @@ pub enum Action {
         widgets: Option<Vec<Widget>>,
     },
     Select {
-        options: HashMap<String, Action>,
+        description: Option<String>,
+        options:     HashMap<String, Action>,
     },
 }
 
@@ -156,6 +160,7 @@ fn display_selector(input: String, preview: Option<&str>) -> Result<Option<Strin
     let default_height = String::from("50%");
     let default_margin = String::from("0%");
     let default_layout = String::from("default");
+    // This is the default settings within the skim 'src/' folder
     let default_theme = String::from(
         "matched:108,matched_bg:0,current:254,current_bg:236,current_match:151,current_match_bg:\
          236,spinner:148,info:144,prompt:110,cursor:161,selected:168,header:109,border:59",
@@ -314,16 +319,30 @@ impl Action {
 
                 run_shell(context, &command, shell)
             },
-            Action::Select { options } => {
+            Action::Select {
+                options,
+                description,
+            } => {
                 let input = options
                     .keys()
-                    .map(|k| k.as_ref())
-                    .collect::<Vec<&str>>()
+                    .map(|k| {
+                        if let Some(desc) = description {
+                            format!("{}: {}", k.green().bold(), desc.magenta())
+                        } else {
+                            k.green().bold().to_string()
+                        }
+                    })
+                    .collect::<Vec<String>>()
                     .join("\n");
                 let selected_command = display_selector(input, None)?;
 
                 selected_command.map_or(Ok(()), |selected_command| {
-                    match options.get(&selected_command) {
+                    let sel = if selected_command.contains(':') {
+                        selected_command.split(':').collect::<Vec<_>>()[0].to_string()
+                    } else {
+                        selected_command
+                    };
+                    match options.get(&sel) {
                         Some(widget) => widget.run(context, config),
                         None => Ok(()),
                     }
