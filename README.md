@@ -4,6 +4,8 @@ A command line launcher inspired by Alfred.
 
 # TODO:
 * Prevent escape button from going through all menus
+* Allow bind option
+* Allow description displaying
 
 ![Usage](assets/usage.gif)
 

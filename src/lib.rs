@@ -58,12 +58,7 @@ use skim::{
     Skim,
 };
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-
-use std::{collections::HashMap, io::Cursor, path::PathBuf, process::Command};
+use std::{collections::HashMap, env, io::Cursor, path::PathBuf, process::Command};
 
 #[derive(Debug)]
 pub struct Context {
@@ -108,7 +103,18 @@ pub enum Action {
 }
 
 fn run_shell(context: &Context, cmd: &str, shell: &str) -> Result<(), Error> {
-    Command::new(shell)
+    let mut builder = Command::new(shell);
+
+    if shell == "zsh" {
+        builder.arg("--shwordsplit");
+        builder.arg("--no-unset");
+        builder.arg("--errexit");
+    } else if shell == "bash" {
+        builder.arg("-e");
+        builder.arg("-u");
+    }
+
+    builder
         .arg("-c")
         .arg(cmd)
         .env("JAIME_CACHE_DIR", &context.cache_directory)
@@ -122,8 +128,19 @@ fn run_shell_command_for_output(
     cmd: &str,
     shell: &str,
 ) -> Result<String, Error> {
+    let mut builder = Command::new(shell);
+
+    if shell == "zsh" {
+        builder.arg("--shwordsplit"); // -y
+        builder.arg("--no-unset"); // -u
+        builder.arg("--errexit"); // -e
+    } else if shell == "bash" {
+        builder.arg("-e");
+        builder.arg("-u");
+    }
+
     Ok(std::str::from_utf8(
-        Command::new(shell)
+        builder
             .arg("-c")
             .arg(cmd)
             .env("JAIME_CACHE_DIR", &context.cache_directory)
@@ -134,11 +151,7 @@ fn run_shell_command_for_output(
     .to_owned())
 }
 
-fn display_selector(
-    input: String,
-    preview: Option<&str>,
-    quit: &Arc<AtomicBool>,
-) -> Result<Option<String>, Error> {
+fn display_selector(input: String, preview: Option<&str>) -> Result<Option<String>, Error> {
     let mut skim_args = Vec::new();
     let default_height = String::from("50%");
     let default_margin = String::from("0%");
@@ -224,14 +237,15 @@ fn display_selector(
     let item_reader = SkimItemReader::new(item_reader_opts);
     let items = item_reader.of_bufread(Cursor::new(input));
 
-    let selected_items =
-        Skim::run_with(&options, Some(items)).map_or_else(Vec::new, |out| out.selected_items);
-
-    if quit.load(Ordering::Relaxed) {
-        std::process::exit(1);
-    }
+    let selected_items = Skim::run_with(&options, Some(items));
 
     Ok(selected_items
+        .map_or_else(Vec::new, |out| {
+            if out.is_abort {
+                std::process::exit(1);
+            }
+            out.selected_items
+        })
         .get(0)
         .map(|selected| selected.output().to_string()))
 }
@@ -254,20 +268,11 @@ impl Action {
     //
     /// # Panics
     /// Unwrapping on `ctrlc`
-    pub fn run(
-        &self,
-        context: &Context,
-        config: &Config,
-        quit: &Arc<AtomicBool>,
-    ) -> Result<(), Error> {
-        let shell = &config
-            .shell
-            .as_ref()
-            .map_or("sh".to_owned(), ToOwned::to_owned);
-
-        if quit.load(Ordering::Relaxed) {
-            std::process::exit(1);
-        }
+    pub fn run(&self, context: &Context, config: &Config) -> Result<(), Error> {
+        let shell = &config.shell.as_ref().map_or(
+            env::var("SHELL").unwrap_or_else(|_| "sh".to_string()),
+            ToOwned::to_owned,
+        );
 
         match self {
             Action::Command { command, widgets } => {
@@ -288,11 +293,8 @@ impl Action {
                                 let output =
                                     run_shell_command_for_output(context, &command, shell)?;
 
-                                let selected_command = display_selector(
-                                    output,
-                                    preview.as_ref().map(|s| s.as_ref()),
-                                    quit,
-                                )?;
+                                let selected_command =
+                                    display_selector(output, preview.as_ref().map(|s| s.as_ref()))?;
 
                                 if let Some(selected_command) = selected_command {
                                     args.push(selected_command);
@@ -318,11 +320,11 @@ impl Action {
                     .map(|k| k.as_ref())
                     .collect::<Vec<&str>>()
                     .join("\n");
-                let selected_command = display_selector(input, None, quit)?;
+                let selected_command = display_selector(input, None)?;
 
                 selected_command.map_or(Ok(()), |selected_command| {
                     match options.get(&selected_command) {
-                        Some(widget) => widget.run(context, config, quit),
+                        Some(widget) => widget.run(context, config),
                         None => Ok(()),
                     }
                 })
