@@ -3,14 +3,15 @@
 A command line launcher inspired by Alfred.
 
 ## TODO:
-* Allow bind options and options for particular command
-* Allow (better) description displaying
 * Make asynchronous
 
 ## Fork:
 * Prevent escape button from going through all menus
 * Colorizes output
-* Reads commands from `SKIM_DEFAULT_OPTIONS`
+* Reads commands from `SKIM_DEFAULT_OPTIONS` or `FZF_DEFAULT_OPTS`
+* Can use `fzf`, `skim` binary, or `skim` library (default)
+* Can start up the selector on a specific command
+* Allows adding descriptions to commands for displaying in the selector
 
 ![Usage](assets/usage.gif)
 
